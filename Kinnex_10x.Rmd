@@ -214,7 +214,7 @@ ggplot(comparison_df, aes(x = sample_id)) +
   geom_bar(aes(y = total_kinnex, fill = "Kinnex"), stat = "identity", position = "dodge") +
   geom_bar(aes(y = total_chromium, fill = "Chromium"), stat = "identity", position = "dodge") +
   geom_bar(aes(y = common, fill = "Common"), stat = "identity") +
-  scale_fill_manual(values = c("Kinnex" = "blue", "Chromium" = "red", "Common" = "purple")) +
+  scale_fill_manual(values = c("Kinnex" = "#1b9e77", "Chromium" = "#d95f02", "Common" = "#7570b3")) +
   labs(title = "Cell Counts by Sample and Platform", 
        x = "Sample", y = "Number of Cells", fill = "Category") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -225,7 +225,7 @@ ggplot(comparison_df, aes(x = sample_id)) +
   geom_point(aes(y = percent_common_kinnex, color = "Kinnex"), size = 3) +
   geom_line(aes(y = percent_common_chromium, group = 1, color = "Chromium"), linewidth = 1) +
   geom_point(aes(y = percent_common_chromium, color = "Chromium"), size = 3) +
-  scale_color_manual(values = c("Kinnex" = "blue", "Chromium" = "red")) +
+  scale_color_manual(values = c("Kinnex" = "#1b9e77", "Chromium" = "#d95f02")) +
   labs(title = "Percentage of Common Cells by Sample and Platform", 
        x = "Sample", y = "Percentage of Common Cells", color = "Platform") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
