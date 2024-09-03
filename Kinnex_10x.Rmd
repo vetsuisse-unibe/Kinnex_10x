@@ -1,0 +1,390 @@
+---
+title: "Kinnex-10x"
+author: "Vidhya Jagannathan"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+
+```{r load-libraries, message=FALSE, warning=FALSE}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(Biostrings)
+library(stringr)
+library(VennDiagram)
+library(grid)
+library(tidyr)
+library(readr)
+library(purrr)
+theme_set(theme_bw(base_size=18))
+```
+
+## Set Working Directory
+
+```{r set-wd}
+setwd("~/work/horse/Mas-seq/")
+```
+
+## Define Helper Functions
+
+```{r helper-functions}
+clean_and_reverse_complement <- function(barcodes, verbose = FALSE) {
+  # Function to clean barcodes and compute reverse complement
+  
+  # Remove any non-DNA characters
+  clean_barcodes <- str_replace_all(barcodes, "[^ACGT]", "")
+  
+  # Check if any barcodes were changed
+  changed <- clean_barcodes != barcodes
+  if (any(changed)) {
+    warning(paste("Cleaned", sum(changed), "barcodes containing non-DNA characters."))
+    if (verbose) {
+      print(data.frame(Original = barcodes[changed], Cleaned = clean_barcodes[changed]))
+    }
+  }
+  
+  # Compute reverse complement
+  rev_comp <- as.character(reverseComplement(DNAStringSet(clean_barcodes)))
+  
+  return(rev_comp)
+}
+```
+
+## Set Up Data Paths
+
+```{r data-paths}
+kinnex_base_path <- "~/work/horse/Mas-seq/"
+chromium_base_path <- "~/work/horse/Mas-seq/10x-chromium/"
+
+sample_ids <- c("M5", "M13", "M14", "M29")
+kinnex_dirs <- list.files(path = kinnex_base_path, pattern = "^M[0-9]+$", full.names = TRUE)
+kinnex_dirs <- kinnex_dirs[dir.exists(kinnex_dirs)]
+chromium_dirs <- list.files(path = chromium_base_path, pattern = "M[0-9]+", full.names = TRUE)
+```
+
+## Process Kinnex Data
+
+```{r process-kinnex}
+kinnex_samples <- lapply(kinnex_dirs, function(sample_dir) {
+  data_dir <- file.path(sample_dir, "genes_seurat")
+  Read10X(data.dir = data_dir)
+})
+
+kinnex_seurat_list <- mapply(function(sample_data, sample_id) {
+  seurat_obj <- CreateSeuratObject(counts = sample_data)
+  seurat_obj <- RenameCells(object = seurat_obj, add.cell.id = sample_id)
+  seurat_obj$orig.ident <- sample_id
+  return(seurat_obj)
+}, kinnex_samples, sample_ids, SIMPLIFY = FALSE)
+
+kinnex_combined <- Reduce(function(x, y) merge(x, y), kinnex_seurat_list)
+```
+
+## Process 10x Chromium Data
+
+```{r process-chromium}
+chromium_samples <- lapply(chromium_dirs, function(sample_dir) {
+  data_dir <- file.path(sample_dir, "filtered_feature_bc_matrix")
+  Read10X(data.dir = data_dir)
+})
+
+chromium_seurat_list <- mapply(function(sample_data, sample_id) {
+  seurat_obj <- CreateSeuratObject(counts = sample_data)
+  seurat_obj <- RenameCells(object = seurat_obj, add.cell.id = sample_id)
+  seurat_obj$orig.ident <- sample_id
+  return(seurat_obj)
+}, chromium_samples, sample_ids, SIMPLIFY = FALSE)
+
+chromium_combined <- Reduce(function(x, y) merge(x, y), chromium_seurat_list)
+```
+
+## Calculate Metrics
+
+```{r calculate-metrics}
+calculate_metrics <- function(seurat_obj) {
+  metadata <- seurat_obj@meta.data
+  metrics <- metadata %>%
+    group_by(orig.ident) %>%
+    summarize(
+      num_cells = n(),
+      mean_reads_per_cell = mean(nCount_RNA),
+      mean_umis_per_cell = mean(nFeature_RNA)
+    )
+  return(metrics)
+}
+
+kinnex_metrics <- calculate_metrics(kinnex_combined)
+kinnex_metrics$platform <- "Kinnex"
+
+chromium_metrics <- calculate_metrics(chromium_combined)
+chromium_metrics$platform <- "Chromium"
+
+combined_metrics <- bind_rows(kinnex_metrics, chromium_metrics)
+
+print(combined_metrics)
+```
+
+## Visualize Metrics
+
+```{r visualize-metrics, fig.width=10, fig.height=6}
+# Plot mean reads per cell
+ggplot(combined_metrics, aes(x = orig.ident, y = mean_reads_per_cell, fill = platform)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(title = "Mean Reads Per Cell by Sample and Platform", x = "Sample", y = "Mean Reads Per Cell") +
+  theme_minimal()
+
+# Plot mean UMIs per cell
+ggplot(combined_metrics, aes(x = orig.ident, y = mean_umis_per_cell, fill = platform)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(title = "Mean UMIs Per Cell by Sample and Platform", x = "Sample", y = "Mean UMIs Per Cell") +
+  theme_minimal()
+
+# Plot number of cells per sample
+ggplot(combined_metrics, aes(x = orig.ident, y = num_cells, fill = platform)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(title = "Number of Cells by Sample and Platform", x = "Sample", y = "Number of Cells") +
+  theme_minimal()
+```
+
+## Compare Barcodes
+
+```{r compare-barcodes}
+kinnex_barcodes <- colnames(kinnex_combined)
+chromium_barcodes <- colnames(chromium_combined)
+
+kinnex_barcodes_rev_comp <- clean_and_reverse_complement(kinnex_barcodes)
+
+extract_barcode <- function(cell_name) {
+  parts <- strsplit(cell_name, "_")[[1]]
+  barcode <- strsplit(parts[2], "-")[[1]][1]
+  return(barcode)
+}
+
+chromium_barcodes_clean <- sapply(chromium_barcodes, extract_barcode)
+
+common_cells <- intersect(kinnex_barcodes_rev_comp, chromium_barcodes_clean)
+unique_kinnex_cells <- setdiff(kinnex_barcodes_rev_comp, chromium_barcodes_clean)
+unique_chromium_cells <- setdiff(chromium_barcodes_clean, kinnex_barcodes_rev_comp)
+
+compare_sample_barcodes <- function(sample_id, kinnex_combined, chromium_combined) {
+  kinnex_sample_barcodes <- colnames(kinnex_combined)[kinnex_combined$orig.ident == sample_id]
+  chromium_sample_barcodes <- colnames(chromium_combined)[chromium_combined$orig.ident == sample_id]
+  
+  kinnex_sample_barcodes_rev_comp <- clean_and_reverse_complement(kinnex_sample_barcodes)
+  
+  chromium_sample_barcodes_clean <- sapply(chromium_sample_barcodes, extract_barcode)
+  
+  common_cells <- intersect(kinnex_sample_barcodes_rev_comp, chromium_sample_barcodes_clean)
+  unique_kinnex_cells <- setdiff(kinnex_sample_barcodes_rev_comp, chromium_sample_barcodes_clean)
+  unique_chromium_cells <- setdiff(chromium_sample_barcodes_clean, kinnex_sample_barcodes_rev_comp)
+  
+  list(
+    sample_id = sample_id,
+    common = length(common_cells),
+    unique_kinnex = length(unique_kinnex_cells),
+    unique_chromium = length(unique_chromium_cells),
+    total_kinnex = length(kinnex_sample_barcodes),
+    total_chromium = length(chromium_sample_barcodes)
+  )
+}
+
+sample_comparisons <- lapply(sample_ids, compare_sample_barcodes, 
+                             kinnex_combined = kinnex_combined, 
+                             chromium_combined = chromium_combined)
+
+comparison_df <- do.call(rbind, lapply(sample_comparisons, as.data.frame))
+
+comparison_df$percent_common_kinnex <- comparison_df$common / comparison_df$total_kinnex * 100
+comparison_df$percent_common_chromium <- comparison_df$common / comparison_df$total_chromium * 100
+
+print(comparison_df)
+```
+
+## Visualize Barcode Comparisons
+
+```{r visualize-barcode-comparisons, fig.width=10, fig.height=6}
+# Create a bar plot of cell counts
+ggplot(comparison_df, aes(x = sample_id)) +
+  geom_bar(aes(y = total_kinnex, fill = "Kinnex"), stat = "identity", position = "dodge") +
+  geom_bar(aes(y = total_chromium, fill = "Chromium"), stat = "identity", position = "dodge") +
+  geom_bar(aes(y = common, fill = "Common"), stat = "identity") +
+  scale_fill_manual(values = c("Kinnex" = "blue", "Chromium" = "red", "Common" = "purple")) +
+  labs(title = "Cell Counts by Sample and Platform", 
+       x = "Sample", y = "Number of Cells", fill = "Category") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Create a plot of overlap percentages
+ggplot(comparison_df, aes(x = sample_id)) +
+  geom_line(aes(y = percent_common_kinnex, group = 1, color = "Kinnex"), linewidth = 1) +
+  geom_point(aes(y = percent_common_kinnex, color = "Kinnex"), size = 3) +
+  geom_line(aes(y = percent_common_chromium, group = 1, color = "Chromium"), linewidth = 1) +
+  geom_point(aes(y = percent_common_chromium, color = "Chromium"), size = 3) +
+  scale_color_manual(values = c("Kinnex" = "blue", "Chromium" = "red")) +
+  labs(title = "Percentage of Common Cells by Sample and Platform", 
+       x = "Sample", y = "Percentage of Common Cells", color = "Platform") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Transcript Classification
+
+```{r transcript-classification}
+combine_other_categories <- function(df, threshold = 5) {
+  total <- sum(df$Value)
+  df$Percentage <- df$Value / total * 100
+  
+  # Identify categories below the threshold
+  small_categories <- df$Classification[df$Percentage < threshold]
+  
+  # Combine small categories into "Other"
+  if (length(small_categories) > 0) {
+    df_main <- df[!(df$Classification %in% small_categories), ]
+    df_other <- data.frame(
+      Classification = "Other",
+      Value = sum(df$Value[df$Classification %in% small_categories]),
+      Percentage = sum(df$Percentage[df$Classification %in% small_categories])
+    )
+    df <- rbind(df_main, df_other)
+  }
+  
+  return(df)
+}
+
+read_filtered_report <- function(file_path) {
+  lines <- readLines(file_path)
+  
+  # Extract basic statistics
+  basic_stats <- data.frame(
+    Metric = c("Input", "Passed", "Removed", "Unique genes", "Unique transcripts"),
+    Value = c(
+      as.numeric(gsub(".*Input\\s*:\\s*(\\d+).*", "\\1", lines[grep("Input", lines)])),
+      as.numeric(gsub(".*Passed\\s*:\\s*(\\d+).*", "\\1", lines[grep("Passed", lines)])),
+      as.numeric(gsub(".*Removed\\s*:\\s*(\\d+).*", "\\1", lines[grep("Removed", lines)])),
+      as.numeric(gsub(".*Unique genes\\s*:\\s*(\\d+).*", "\\1", lines[grep("Unique genes", lines)])),
+      as.numeric(gsub(".*Unique transcripts\\s*:\\s*(\\d+).*", "\\1", lines[grep("Unique transcripts", lines)]))
+    )
+  )
+  
+  # Extract isoform classifications
+  isoform_start <- which(grepl("Classifications, by isoform", lines)) + 2  # Skip the dashed line
+  isoform_end <- which(grepl("Classifications, by read", lines)) - 1
+  isoform_lines <- lines[isoform_start:isoform_end]
+  
+  isoform_class <- data.frame(
+    Classification = gsub("\\s*:.*", "", isoform_lines),
+    Value = as.numeric(gsub(".*:\\s*(\\d+).*", "\\1", isoform_lines)),
+    Percentage = as.numeric(gsub(".*\\((.*)%\\)", "\\1", isoform_lines))
+  )
+  
+  # Extract read classifications
+  read_start <- which(grepl("Classifications, by read", lines)) + 2  # Skip the dashed line
+  read_end <- which(grepl("Junctions", lines)) - 1
+  read_lines <- lines[read_start:read_end]
+  
+  read_class <- data.frame(
+    Classification = gsub("\\s*:.*", "", read_lines),
+    Value = as.numeric(gsub(".*:\\s*(\\d+).*", "\\1", read_lines)),
+    Percentage = as.numeric(gsub(".*\\((.*)%\\)", "\\1", read_lines))
+  )
+  
+  # Extract gene information
+  gene_start <- which(grepl("^Genes", lines)) + 2
+  gene_lines <- lines[gene_start:(gene_start + 1)]
+  
+  gene_info <- data.frame(
+    Type = c("Known", "Novel"),
+    Value = as.numeric(gsub(".*:\\s*(\\d+).*", "\\1", gene_lines)),
+    Percentage = as.numeric(gsub(".*\\((.*?)%\\).*", "\\1", gene_lines))
+  )
+  
+  list(basic_stats = basic_stats, isoform_class = isoform_class, 
+       read_class = read_class, gene_info = gene_info)
+}
+
+# Process data
+sample_files <- c("M5_classification.filtered.summary.txt", "M13_classification.filtered.summary.txt", "M14_classification.filtered.summary.txt", "M29_classification.filtered.summary.txt")
+sample_data <- map(sample_files, read_filtered_report)
+names(sample_data) <- c("M5", "M13", "M14", "M29")
+
+# Define a color palette that matches the categories
+category_colors <- c(
+  "Full splice match" = "#D55E00",
+  "Incomplete splice match" = "#009E73",
+  "Novel in catalog" = "#56B4E9",
+  "Novel not in catalog" = "#0072B2",
+  "Other" = "#CC79A7"
+)
+
+# Combine data for plotting
+plot_data <- map_dfr(names(sample_data), function(sample) {
+  basic_stats <- sample_data[[sample]]$basic_stats %>%
+    mutate(Sample = sample, Type = "Basic", Classification = Metric, Percentage = NA)
+  
+  isoform_class <- sample_data[[sample]]$isoform_class %>%
+    combine_other_categories() %>%
+    mutate(Sample = sample, Type = "Isoform", Metric = NA)
+  
+  read_class <- sample_data[[sample]]$read_class %>%
+    combine_other_categories() %>%
+    mutate(Sample = sample, Type = "Read", Metric = NA)
+  
+  bind_rows(basic_stats, isoform_class, read_class)
+}, .id = "Sample")
+
+# Prepare gene data for plotting
+gene_data <- map_dfr(names(sample_data), function(sample) {
+  sample_data[[sample]]$gene_info %>%
+    mutate(Sample = sample)
+}, .id = "Sample")
+
+# Create plots
+basic_plot <- ggplot(plot_data %>% filter(Type == "Basic"), 
+                     aes(x = Sample, y = Value, fill = Classification)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_log10() +
+  labs(title = "Basic Statistics",
+       y = "Count (log scale)", fill = "Metric") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Isoform Classifications Plot
+isoform_plot <- ggplot(plot_data %>% filter(Type == "Isoform"), 
+                       aes(x = Sample, y = Value, fill = Classification)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_log10() +
+  scale_fill_manual(values = category_colors) +
+  labs(title = "Isoform Classifications",
+       x = "Sample", y = "Count (log scale)", fill = "Category") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Read Classifications Plot
+read_plot <- ggplot(plot_data %>% filter(Type == "Read"), 
+                    aes(x = Sample, y = Value, fill = Classification)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_log10() +
+  scale_fill_manual(values = category_colors) +
+  labs(title = "Read Classifications",
+       x = "Sample", y = "Count (log scale)", fill = "Category") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gene_plot <- ggplot(gene_data, aes(x = Sample, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = paste0(Value, " (", Percentage, "%)")), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, size = 3) +
+  scale_y_log10() +
+  labs(title = "Known and Novel Genes",
+       y = "Count (log scale)", fill = "Gene Type") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Display plots
+print(basic_plot)
+print(isoform_plot)
+print(read_plot)
+print(gene_plot)
